@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+yfinance
+xgboost
+scikit-learn
+plotly
+ta
+tensorflow
+Aggiunto requirements.txt
