@@ -1,62 +1,116 @@
-import streamlit as st
+"""
+Strategia di Analisi Tecnica per Opzioni Binarie
+- Caricamento dati
+- Pulizia e preparazione
+- Calcolo sicuro dell'Accumulation/Distribution Index (ADI)
+- Evita gli errori di pandas_ta (1-dimensional, sanitize_array, ecc.)
+"""
+
 import pandas as pd
-import numpy as np
-import yfinance as yf
-from datetime import datetime
-import xgboost as xgb
-from sklearn.model_selection import train_test_split
-from ta import add_all_ta_features
+import pandas_ta as ta
+from pathlib import Path
 
-st.set_page_config(page_title="Opzioni Binarie PRO", layout="wide")
-st.title("🎯 Previsioni Opzioni Binarie - PRO")
+# ========================= CONFIGURAZIONE =========================
+# Cambia qui il percorso del tuo file CSV (o usa yfinance, ecc.)
+DATA_PATH = Path("data.csv")          # <-- MODIFICA CON IL TUO FILE
 
-assets = ["EURUSD=X", "BTC-USD", "ETH-USD", "AAPL", "TSLA"]
-selected_assets = st.sidebar.multiselect("Asset", assets, default=["EURUSD=X", "BTC-USD"])
+# Nome delle colonne nel tuo CSV (modificale se necessario)
+COLUMN_MAPPING = {
+    'Open': 'open',
+    'High': 'high',
+    'Low': 'low',
+    'Close': 'close',
+    'Volume': 'volume',
+    # Aggiungi altre colonne se servono
+}
 
-interval = st.sidebar.selectbox("Intervallo", ["1m", "5m"])
-period = st.sidebar.selectbox("Periodo", ["7d", "30d"])
-target_minutes = st.sidebar.slider("Minuti previsione", 1, 15, 5)
-confidence = st.sidebar.slider("Confidenza minima %", 60, 90, 70)
+# ================================================================
 
-@st.cache_data(ttl=60)
-def get_data(ticker):
-    return yf.download(ticker, period=period, interval=interval, progress=False)
+def load_and_prepare_data(file_path: Path) -> pd.DataFrame:
+    """Carica i dati e li prepara in formato corretto."""
+    print(f"Caricamento dati da: {file_path}")
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"File non trovato: {file_path}")
+    
+    # Carica il CSV (modifica delimiter o parse_dates se serve)
+    df = pd.read_csv(file_path)
+    
+    # Rinomina colonne in minuscolo (standard pandas_ta)
+    df = df.rename(columns=COLUMN_MAPPING)
+    
+    # Converti in numerico (sicuro)
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Gestione indice temporale (molto importante per evitare errori!)
+    if 'Date' in df.columns or 'date' in df.columns:
+        date_col = 'Date' if 'Date' in df.columns else 'date'
+        df[date_col] = pd.to_datetime(df[date_col])
+        df = df.set_index(date_col)
+    
+    df = df.sort_index()
+    
+    # Rimuovi righe con valori mancanti nelle colonne essenziali
+    required_cols = ['high', 'low', 'close', 'volume']
+    df = df.dropna(subset=required_cols)
+    
+    print(f"Dati caricati con successo: {len(df)} righe")
+    return df
 
-signals = []
 
-for ticker in selected_assets:
-    df = get_data(ticker)
-    if len(df) < 50:
-        continue
+def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcola gli indicatori in modo sicuro (evita errori comuni di pandas_ta)."""
+    print("Calcolo indicatori tecnici...")
     
-    data = df.copy()
-    data = add_all_ta_features(data, open="Open", high="High", low="Low", close="Close", volume="Volume", fillna=True)
+    # Forza le colonne a essere Series 1-dimensionali (risolve l'errore "Data must be 1-dimensional")
+    df = df.copy()
+    for col in ['high', 'low', 'close', 'volume']:
+        if col in df.columns:
+            df[col] = df[col].squeeze()   # rimuove dimensioni extra
     
-    future = data["Close"].shift(-target_minutes)
-    data["Target"] = (future > data["Close"]).astype(int)
-    data = data.dropna()
+    # Calcolo esplicito e sicuro dell'ADI (Accumulation/Distribution Index)
+    try:
+        df['ADI'] = ta.ad(
+            high=df['high'],
+            low=df['low'],
+            close=df['close'],
+            volume=df['volume']
+        )
+        print("✅ Accumulation/Distribution Index calcolato correttamente")
+    except Exception as e:
+        print(f"❌ Errore durante il calcolo ADI: {e}")
+        raise
     
-    features = [col for col in data.columns if col not in ["Open","High","Low","Close","Adj Close","Volume","Target"]]
+    # Qui puoi aggiungere altri indicatori che ti servono (esempi):
+    # df['SMA_20'] = ta.sma(df['close'], length=20)
+    # df['RSI'] = ta.rsi(df['close'], length=14)
     
-    X = data[features]
-    y = data["Target"]
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, shuffle=False)
-    
-    model = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, random_state=42)
-    model.fit(X_train, y_train)
-    
-    latest = data[features].iloc[-1:].values
-    prob = model.predict_proba(latest)[0][1]
-    
-    if prob >= (confidence/100):
-        signals.append([ticker, "🟢 UP", f"{prob*100:.1f}%", f"{data['Close'].iloc[-1]:.4f}"])
+    return df
 
-st.subheader("Segnali Attivi")
-if signals:
-    st.success(f"✅ {len(signals)} Segnali trovati!")
-    st.table(pd.DataFrame(signals, columns=["Asset", "Direzione", "Confidenza", "Prezzo"]))
-else:
-    st.info("Nessun segnale forte al momento")
 
-st.caption(f"Aggiornato: {datetime.now().strftime('%H:%M:%S')}")
+def main():
+    try:
+        # 1. Carica e prepara i dati
+        data = load_and_prepare_data(DATA_PATH)
+        
+        # 2. Calcola gli indicatori in modo robusto
+        data = calculate_indicators(data)
+        
+        # 3. Salva il risultato
+        output_file = "data_with_adi.csv"
+        data.to_csv(output_file)
+        print(f"✅ File salvato con successo: {output_file}")
+        
+        # Mostra un'anteprima
+        print("\nAnteprima degli ultimi dati:")
+        print(data[['close', 'volume', 'ADI']].tail(10))
+        
+    except Exception as e:
+        print(f"\n❌ Errore generale: {e}")
+        print("Controlla il percorso del file e i nomi delle colonne.")
+
+
+if __name__ == "__main__":
+    main()
